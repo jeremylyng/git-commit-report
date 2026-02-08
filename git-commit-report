@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 VERSION_URL="https://raw.githubusercontent.com/jeremylyng/git-commit-report/main/git-commit-report"
 
 # ---------- Colors (disabled if not a terminal) ----------
 if [ -t 1 ]; then
-  BOLD='\033[1m'
-  DIM='\033[2m'
-  CYAN='\033[36m'
-  GREEN='\033[32m'
-  YELLOW='\033[33m'
-  RED='\033[31m'
-  RESET='\033[0m'
+  BOLD=$'\033[1m'
+  DIM=$'\033[2m'
+  CYAN=$'\033[36m'
+  GREEN=$'\033[32m'
+  YELLOW=$'\033[33m'
+  RED=$'\033[31m'
+  RESET=$'\033[0m'
 else
   BOLD="" DIM="" CYAN="" GREEN="" YELLOW="" RED="" RESET=""
 fi
@@ -285,7 +285,7 @@ while [[ $# -gt 0 ]]; do
       CLI_SET="$CLI_SET SKIP_FETCH"
       shift
       ;;
-    -h|--help)
+    -h|--help|help)
       usage
       ;;
     -v|--version)
@@ -297,7 +297,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo -e "${RED}Unknown option: $1${RESET}" >&2
-      echo "Run with -h for usage." >&2
+      echo "Run 'git commit-report -h' for usage." >&2
       exit 1
       ;;
   esac
@@ -332,8 +332,8 @@ if [ -n "$REPO_PATH" ]; then
 elif ! git rev-parse --git-dir >/dev/null 2>&1; then
   # Not in a git repo and no --repo flag — interactive repo selection
   info ""
-  info "${BOLD}Commit Report Generator${RESET}"
-  info "${DIM}═══════════════════════${RESET}"
+  info "${BOLD}Commit Report Generator${RESET} ${DIM}v${VERSION}${RESET}"
+  info "${DIM}══════════════════════════════${RESET}"
   info ""
   info "${YELLOW}Not inside a git repository.${RESET}"
   info ""
@@ -441,8 +441,8 @@ format_pr_link() {
 # ---------- Interactive mode (no period specified) ----------
 if [ -z "$DAYS_BACK" ] && [ -z "$DATE_FROM" ]; then
   info ""
-  info "${BOLD}Commit Report Generator${RESET}"
-  info "${DIM}═══════════════════════${RESET}"
+  info "${BOLD}Commit Report Generator${RESET} ${DIM}v${VERSION}${RESET}"
+  info "${DIM}══════════════════════════════${RESET}"
   info ""
   info "  Repository: ${CYAN}${REPO_DISPLAY}${RESET}"
   info ""
@@ -468,6 +468,62 @@ if [ -z "$DAYS_BACK" ] && [ -z "$DATE_FROM" ]; then
       DAYS_BACK="3"
       ;;
   esac
+  echo ""
+
+  # ---------- Additional options ----------
+  if ! cli_was_set AUTHOR_FILTER && [ -z "$AUTHOR_FILTER" ]; then
+    read -rp "Filter by author (leave blank for all): " author_input
+    [ -n "$author_input" ] && AUTHOR_FILTER="$author_input"
+  fi
+
+  if ! cli_was_set BRANCH_FILTER && [ -z "$BRANCH_FILTER" ]; then
+    read -rp "Filter by branch (leave blank for all): " branch_input
+    [ -n "$branch_input" ] && BRANCH_FILTER="$branch_input"
+  fi
+
+  if ! cli_was_set NO_MERGES && [ "$NO_MERGES" != true ]; then
+    read -rp "Exclude merge commits? [y/N]: " merges_input
+    if [ "$merges_input" = "y" ] || [ "$merges_input" = "Y" ]; then
+      NO_MERGES=true
+    fi
+  fi
+
+  if ! cli_was_set OUTPUT_FORMAT && [ "$OUTPUT_FORMAT" = "markdown" ]; then
+    echo ""
+    echo "Output format:"
+    echo ""
+    echo -e "  ${CYAN}1)${RESET} Markdown (default)"
+    echo -e "  ${CYAN}2)${RESET} JSON"
+    echo -e "  ${CYAN}3)${RESET} CSV"
+    echo ""
+    read -rp "Choice [1/2/3]: " format_choice
+    case "$format_choice" in
+      2) OUTPUT_FORMAT="json" ;;
+      3) OUTPUT_FORMAT="csv" ;;
+      *) OUTPUT_FORMAT="markdown" ;;
+    esac
+  fi
+
+  if ! cli_was_set OUTPUT_DIR && [ -z "$OUTPUT_DIR" ]; then
+    read -rp "Output directory (leave blank for repo root): " outdir_input
+    [ -n "$outdir_input" ] && OUTPUT_DIR="$outdir_input"
+  fi
+
+  # ---------- Summary ----------
+  echo ""
+  info "${DIM}──────────────────────────────${RESET}"
+  info "  Repository: ${CYAN}${REPO_DISPLAY}${RESET}"
+  if [ -n "$DAYS_BACK" ]; then
+    info "  Period:     Last ${DAYS_BACK} days"
+  else
+    info "  Period:     ${DATE_FROM} to ${DATE_TO}"
+  fi
+  [ -n "$AUTHOR_FILTER" ] && info "  Author:     ${AUTHOR_FILTER}"
+  [ -n "$BRANCH_FILTER" ] && info "  Branch:     ${BRANCH_FILTER}"
+  [ "$NO_MERGES" = true ] && info "  Merges:     excluded"
+  info "  Format:     ${OUTPUT_FORMAT}"
+  [ -n "$OUTPUT_DIR" ] && info "  Output dir: ${OUTPUT_DIR}"
+  info "${DIM}──────────────────────────────${RESET}"
   info ""
 fi
 

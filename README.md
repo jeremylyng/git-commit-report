@@ -98,6 +98,8 @@ git commit-report -d 3 --no-fetch
 | `-h, --help` | Show help |
 | `-v, --version` | Show version |
 
+> **Note:** When using the git subcommand form, `git commit-report --help` opens a man page (git default behavior). Use `git commit-report -h` or `git commit-report help` instead.
+
 ### Output
 
 Generates `COMMIT_REPORT_<from>_<to>.<ext>` with:
