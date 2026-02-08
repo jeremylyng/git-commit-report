@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="1.1.1"
+VERSION="1.1.2"
 VERSION_URL="https://raw.githubusercontent.com/jeremylyng/git-commit-report/main/git-commit-report"
 
 # ---------- Colors (disabled if not a terminal) ----------
@@ -472,18 +472,20 @@ if [ -z "$DAYS_BACK" ] && [ -z "$DATE_FROM" ]; then
 
   # ---------- Additional options ----------
   if ! cli_was_set AUTHOR_FILTER && [ -z "$AUTHOR_FILTER" ]; then
-    read -rp "Filter by author (leave blank for all): " author_input
+    read -rp "Filter by author [all]: " author_input
     [ -n "$author_input" ] && AUTHOR_FILTER="$author_input"
   fi
 
   if ! cli_was_set BRANCH_FILTER && [ -z "$BRANCH_FILTER" ]; then
-    read -rp "Filter by branch (leave blank for all): " branch_input
+    read -rp "Filter by branch [all]: " branch_input
     [ -n "$branch_input" ] && BRANCH_FILTER="$branch_input"
   fi
 
-  if ! cli_was_set NO_MERGES && [ "$NO_MERGES" != true ]; then
-    read -rp "Exclude merge commits? [y/N]: " merges_input
-    if [ "$merges_input" = "y" ] || [ "$merges_input" = "Y" ]; then
+  if ! cli_was_set NO_MERGES; then
+    read -rp "Exclude merge commits? [Y/n]: " merges_input
+    if [ "$merges_input" = "n" ] || [ "$merges_input" = "N" ]; then
+      NO_MERGES=false
+    else
       NO_MERGES=true
     fi
   fi
@@ -505,7 +507,7 @@ if [ -z "$DAYS_BACK" ] && [ -z "$DATE_FROM" ]; then
   fi
 
   if ! cli_was_set OUTPUT_DIR && [ -z "$OUTPUT_DIR" ]; then
-    read -rp "Output directory (leave blank for repo root): " outdir_input
+    read -rp "Output directory [repo root]: " outdir_input
     [ -n "$outdir_input" ] && OUTPUT_DIR="$outdir_input"
   fi
 
