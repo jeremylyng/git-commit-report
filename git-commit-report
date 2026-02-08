@@ -1,0 +1,493 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="1.0.0"
+
+# ---------- Colors (disabled if not a terminal) ----------
+if [ -t 1 ]; then
+  BOLD='\033[1m'
+  DIM='\033[2m'
+  CYAN='\033[36m'
+  GREEN='\033[32m'
+  YELLOW='\033[33m'
+  RED='\033[31m'
+  RESET='\033[0m'
+else
+  BOLD="" DIM="" CYAN="" GREEN="" YELLOW="" RED="" RESET=""
+fi
+
+usage() {
+  cat <<USAGE
+${BOLD}git-commit-report${RESET} v${VERSION} — Generate markdown commit reports from git history
+
+${BOLD}USAGE${RESET}
+  git commit-report [options]
+  git-commit-report [options]
+
+${BOLD}OPTIONS${RESET}
+  -d, --days <N>           Last N days (default: 3)
+  --from <YYYY-MM-DD>      Start date (inclusive)
+  --to <YYYY-MM-DD>        End date (inclusive, default: today)
+  -r, --repo <path>        Path to git repository (default: current directory)
+  -o, --output <file>      Output filename (default: COMMIT_REPORT_<from>_<to>.md)
+  --no-fetch               Skip git fetch
+  -h, --help               Show this help message
+  -v, --version            Show version
+
+${BOLD}EXAMPLES${RESET}
+  git commit-report                                    Interactive mode
+  git commit-report -d 7                               Last 7 days
+  git commit-report --from 2026-02-01                  Feb 1 to today
+  git commit-report --from 2026-02-01 --to 2026-02-07 Date range
+  git commit-report -r ~/projects/my-app -d 14         Specify repo
+USAGE
+  exit 0
+}
+
+# ---------- Argument parsing ----------
+DAYS_BACK=""
+DATE_FROM=""
+DATE_TO=""
+OUTPUT_FILE=""
+REPO_PATH=""
+SKIP_FETCH=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -d|--days)
+      DAYS_BACK="$2"
+      shift 2
+      ;;
+    --from)
+      DATE_FROM="$2"
+      shift 2
+      ;;
+    --to)
+      DATE_TO="$2"
+      shift 2
+      ;;
+    -r|--repo)
+      REPO_PATH="$2"
+      shift 2
+      ;;
+    -o|--output)
+      OUTPUT_FILE="$2"
+      shift 2
+      ;;
+    --no-fetch)
+      SKIP_FETCH=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      ;;
+    -v|--version)
+      echo "git-commit-report v${VERSION}"
+      exit 0
+      ;;
+    *)
+      echo -e "${RED}Unknown option: $1${RESET}"
+      echo "Run with -h for usage."
+      exit 1
+      ;;
+  esac
+done
+
+# ---------- Resolve repository ----------
+if [ -n "$REPO_PATH" ]; then
+  # Explicit repo path provided
+  if [ ! -d "$REPO_PATH" ]; then
+    echo -e "${RED}Error: Directory not found: ${REPO_PATH}${RESET}"
+    exit 1
+  fi
+  cd "$REPO_PATH"
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo -e "${RED}Error: Not a git repository: ${REPO_PATH}${RESET}"
+    exit 1
+  fi
+elif ! git rev-parse --git-dir >/dev/null 2>&1; then
+  # Not in a git repo and no --repo flag — interactive repo selection
+  echo ""
+  echo -e "${BOLD}Commit Report Generator${RESET}"
+  echo -e "${DIM}═══════════════════════${RESET}"
+  echo ""
+  echo -e "${YELLOW}Not inside a git repository.${RESET}"
+  echo ""
+
+  # Find recent git repos the user has visited
+  RECENT_REPOS=()
+  while IFS= read -r dir; do
+    RECENT_REPOS+=("$dir")
+  done < <(find ~/Documents ~/Projects ~/repos ~/src ~/code ~/Developer ~/Desktop 2>/dev/null -maxdepth 3 -name ".git" -type d -not -path "*/node_modules/*" 2>/dev/null | sed 's|/.git$||' | head -10)
+
+  if [ ${#RECENT_REPOS[@]} -gt 0 ]; then
+    echo "Found git repositories:"
+    echo ""
+    for i in "${!RECENT_REPOS[@]}"; do
+      echo -e "  ${CYAN}$((i + 1)))${RESET} ${RECENT_REPOS[$i]}"
+    done
+    echo -e "  ${CYAN}p)${RESET} Enter a path manually"
+    echo ""
+    read -rp "Select repository: " repo_choice
+
+    if [ "$repo_choice" = "p" ] || [ "$repo_choice" = "P" ]; then
+      read -rp "Repository path: " REPO_PATH
+    elif [[ "$repo_choice" =~ ^[0-9]+$ ]] && [ "$repo_choice" -ge 1 ] && [ "$repo_choice" -le ${#RECENT_REPOS[@]} ]; then
+      REPO_PATH="${RECENT_REPOS[$((repo_choice - 1))]}"
+    else
+      echo -e "${RED}Invalid selection.${RESET}"
+      exit 1
+    fi
+  else
+    read -rp "Repository path: " REPO_PATH
+  fi
+
+  if [ ! -d "$REPO_PATH" ]; then
+    echo -e "${RED}Error: Directory not found: ${REPO_PATH}${RESET}"
+    exit 1
+  fi
+  cd "$REPO_PATH"
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo -e "${RED}Error: Not a git repository: ${REPO_PATH}${RESET}"
+    exit 1
+  fi
+  echo ""
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+REPO_NAME="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || basename "$REPO_ROOT")"
+REPO_DISPLAY="${REPO_NAME}"
+
+# ---------- Interactive mode (no period specified) ----------
+if [ -z "$DAYS_BACK" ] && [ -z "$DATE_FROM" ]; then
+  echo ""
+  echo -e "${BOLD}Commit Report Generator${RESET}"
+  echo -e "${DIM}═══════════════════════${RESET}"
+  echo ""
+  echo -e "  Repository: ${CYAN}${REPO_DISPLAY}${RESET}"
+  echo ""
+  echo "How would you like to specify the report period?"
+  echo ""
+  echo -e "  ${CYAN}1)${RESET} Last N days"
+  echo -e "  ${CYAN}2)${RESET} Date range"
+  echo ""
+  read -rp "Choice [1/2]: " choice
+
+  case "$choice" in
+    1)
+      read -rp "Number of days back [3]: " days_input
+      DAYS_BACK="${days_input:-3}"
+      ;;
+    2)
+      read -rp "From date (YYYY-MM-DD): " DATE_FROM
+      read -rp "To date (YYYY-MM-DD) [today]: " to_input
+      DATE_TO="${to_input:-$(date '+%Y-%m-%d')}"
+      ;;
+    *)
+      echo "Invalid choice. Using default (last 3 days)."
+      DAYS_BACK="3"
+      ;;
+  esac
+  echo ""
+fi
+
+# ---------- Resolve date range ----------
+if [ -n "$DATE_FROM" ]; then
+  # Date range mode
+  DATE_TO="${DATE_TO:-$(date '+%Y-%m-%d')}"
+
+  # Validate date formats (macOS)
+  if date -j -f '%Y-%m-%d' "$DATE_FROM" '+%Y-%m-%d' >/dev/null 2>&1; then
+    GIT_AFTER="$DATE_FROM"
+    GIT_BEFORE="$(date -j -v+1d -f '%Y-%m-%d' "$DATE_TO" '+%Y-%m-%d')"
+    PERIOD_LABEL="$(date -j -f '%Y-%m-%d' "$DATE_FROM" '+%d %b %y') - $(date -j -f '%Y-%m-%d' "$DATE_TO" '+%d %b %y')"
+  # Validate date formats (Linux/GNU)
+  elif date -d "$DATE_FROM" '+%Y-%m-%d' >/dev/null 2>&1; then
+    GIT_AFTER="$DATE_FROM"
+    GIT_BEFORE="$(date -d "$DATE_TO + 1 day" '+%Y-%m-%d')"
+    PERIOD_LABEL="$(date -d "$DATE_FROM" '+%d %b %y') - $(date -d "$DATE_TO" '+%d %b %y')"
+  else
+    echo -e "${RED}Error: Invalid date format '$DATE_FROM'. Use YYYY-MM-DD.${RESET}"
+    exit 1
+  fi
+else
+  # Days-back mode
+  DAYS_BACK="${DAYS_BACK:-3}"
+
+  # macOS
+  if date -j -v-1d '+%Y-%m-%d' >/dev/null 2>&1; then
+    DATE_FROM="$(date -j -v-"${DAYS_BACK}"d '+%Y-%m-%d')"
+    DATE_TO="$(date '+%Y-%m-%d')"
+    GIT_AFTER="$DATE_FROM"
+    GIT_BEFORE="$(date -j -v+1d '+%Y-%m-%d')"
+    PERIOD_LABEL="$(date -j -f '%Y-%m-%d' "$DATE_FROM" '+%d %b %y') - $(date -j -f '%Y-%m-%d' "$DATE_TO" '+%d %b %y') (${DAYS_BACK} days)"
+  # Linux/GNU
+  else
+    DATE_FROM="$(date -d "${DAYS_BACK} days ago" '+%Y-%m-%d')"
+    DATE_TO="$(date '+%Y-%m-%d')"
+    GIT_AFTER="$DATE_FROM"
+    GIT_BEFORE="$(date -d "tomorrow" '+%Y-%m-%d')"
+    PERIOD_LABEL="$(date -d "$DATE_FROM" '+%d %b %y') - $(date -d "$DATE_TO" '+%d %b %y') (${DAYS_BACK} days)"
+  fi
+fi
+
+# ---------- Output filename ----------
+if [ -z "$OUTPUT_FILE" ]; then
+  OUTPUT_FILE="COMMIT_REPORT_${DATE_FROM}_${DATE_TO}.md"
+fi
+
+REPORT_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
+LOCAL_TZ="$(date +%Z)"
+
+# Get local UTC offset in ±HH:MM format
+if date -j '+%z' >/dev/null 2>&1; then
+  LOCAL_OFFSET="$(date +%z | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)/\1:\2/')"
+else
+  LOCAL_OFFSET="$(date +%z | sed 's/\([+-][0-9][0-9]\)\([0-9][0-9]\)/\1:\2/')"
+fi
+
+TMPDIR_WORK="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR_WORK"' EXIT
+
+PR_MAP="${TMPDIR_WORK}/pr_map.txt"
+ROWS_FILE="${TMPDIR_WORK}/rows.tsv"
+AUTHOR_STATS="${TMPDIR_WORK}/author_stats.tsv"
+PR_STATS="${TMPDIR_WORK}/pr_stats.tsv"
+
+# ---------- Fetch ----------
+if [ "$SKIP_FETCH" = false ]; then
+  echo -e "${DIM}Fetching latest from all remotes...${RESET}"
+  git fetch --all --quiet
+fi
+
+echo -e "Generating report for ${BOLD}${REPO_DISPLAY}${RESET} — ${CYAN}${PERIOD_LABEL}${RESET}"
+
+# ---------- Collect PR branch -> number + title mapping ----------
+HAS_GH=false
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  HAS_GH=true
+  REPO_NAME="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || basename "$REPO_ROOT")"
+  gh pr list --state all --limit 100 --json number,title,headRefName \
+    --jq '.[] | "\(.headRefName)\t\(.number)\t\(.title)"' 2>/dev/null > "$PR_MAP" || true
+else
+  > "$PR_MAP"
+fi
+
+lookup_pr_by_branch() {
+  local branch="$1"
+  awk -F'\t' -v b="$branch" '$1 == b { print $2; exit }' "$PR_MAP"
+}
+
+lookup_pr_title() {
+  local num="$1"
+  awk -F'\t' -v n="$num" '$2 == n { print $3; exit }' "$PR_MAP"
+}
+
+# ---------- Collect commits ----------
+COMMITS="$(git log --all --after="$GIT_AFTER" --before="$GIT_BEFORE" \
+  --format="%H|%an|%ad|%aI|%s" --date=short --date-order)"
+
+if [ -z "$COMMITS" ]; then
+  echo -e "${YELLOW}No commits found for ${PERIOD_LABEL}.${RESET}"
+  exit 0
+fi
+
+TOTAL_COMMITS=0
+
+# ---------- Process each commit ----------
+> "$ROWS_FILE"
+> "$AUTHOR_STATS"
+> "$PR_STATS"
+
+while IFS='|' read -r hash author date datetime message; do
+  TOTAL_COMMITS=$((TOTAL_COMMITS + 1))
+
+  # File stats
+  added_files="$(git diff-tree --no-commit-id -r --diff-filter=A "$hash" 2>/dev/null | wc -l | tr -d ' ')"
+  modified_files="$(git diff-tree --no-commit-id -r --diff-filter=M "$hash" 2>/dev/null | wc -l | tr -d ' ')"
+  deleted_files="$(git diff-tree --no-commit-id -r --diff-filter=D "$hash" 2>/dev/null | wc -l | tr -d ' ')"
+
+  numstat="$(git diff-tree --no-commit-id -r --numstat "$hash" 2>/dev/null || true)"
+  lines_added="$(echo "$numstat" | awk '{s+=$1} END {print s+0}')"
+  lines_removed="$(echo "$numstat" | awk '{s+=$2} END {print s+0}')"
+
+  # Determine PR number
+  pr_num=""
+  if echo "$message" | grep -qoE '\(#[0-9]+\)'; then
+    pr_num="$(echo "$message" | grep -oE '\(#[0-9]+\)' | tail -1 | tr -d '(#)')"
+  elif [ "$HAS_GH" = true ]; then
+    while IFS= read -r raw_branch; do
+      branch="$(echo "$raw_branch" | sed 's|.*remotes/origin/||' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')"
+      case "$branch" in
+        HEAD*|staging|main|master) continue ;;
+      esac
+      found_pr="$(lookup_pr_by_branch "$branch")"
+      if [ -n "$found_pr" ]; then
+        pr_num="$found_pr"
+        break
+      fi
+    done < <(git branch -a --contains "$hash" 2>/dev/null | grep 'remotes/origin/' || true)
+
+    if [ -z "$pr_num" ]; then
+      if git branch -a --contains "$hash" 2>/dev/null | grep -qE 'remotes/origin/(staging|main|master)$'; then
+        pr_num="direct"
+      fi
+    fi
+  fi
+
+  # Detect remote URL for PR links
+  if [ -z "${REMOTE_URL:-}" ]; then
+    REMOTE_URL="$(git remote get-url origin 2>/dev/null || echo "")"
+    if echo "$REMOTE_URL" | grep -q "github.com"; then
+      IS_GITHUB=true
+    else
+      IS_GITHUB=false
+    fi
+  fi
+
+  # Format PR column
+  if [ -z "$pr_num" ]; then
+    pr_display="—"
+    pr_key="none"
+  elif [ "$pr_num" = "direct" ]; then
+    pr_display="Direct commit"
+    pr_key="direct"
+  else
+    pr_title="$(lookup_pr_title "$pr_num")"
+    if [ "$IS_GITHUB" = true ] && [ -n "$REPO_NAME" ] && [ "$REPO_NAME" != "$(basename "$REPO_ROOT")" ]; then
+      pr_link="[#${pr_num}](https://github.com/${REPO_NAME}/pull/${pr_num})"
+    else
+      pr_link="#${pr_num}"
+    fi
+    if [ -n "$pr_title" ]; then
+      pr_display="${pr_title} ${pr_link}"
+    else
+      pr_display="${pr_link}"
+    fi
+    pr_key="$pr_num"
+  fi
+
+  # Format timestamp in author's timezone; show offset if not local
+  author_time="$(echo "$datetime" | sed 's/T/ /' | sed 's/[+-][0-9][0-9]:[0-9][0-9]$//')"
+  tz_offset="$(echo "$datetime" | grep -oE '[+-][0-9][0-9]:[0-9][0-9]$')"
+  if [ "$tz_offset" = "$LOCAL_OFFSET" ]; then
+    timestamp="$author_time"
+  else
+    timestamp="${author_time} (${tz_offset})"
+  fi
+
+  short_hash="${hash:0:8}"
+
+  # Append row
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$timestamp" "$date" "\`${short_hash}\`" "$author" "$message" "$pr_display" \
+    "$added_files" "$modified_files" "$deleted_files" "+${lines_added}" "-${lines_removed}" \
+    "$pr_key" "$lines_added" "$lines_removed" "$datetime" >> "$ROWS_FILE"
+
+  printf '%s\t%s\t%s\n' "$author" "$lines_added" "$lines_removed" >> "$AUTHOR_STATS"
+  if [ "$pr_key" != "none" ]; then
+    printf '%s\t%s\t%s\n' "$pr_key" "$lines_added" "$lines_removed" >> "$PR_STATS"
+  fi
+
+  echo -ne "  Processing commit ${TOTAL_COMMITS}...\r"
+done <<< "$COMMITS"
+
+echo ""
+
+# Sort by author date descending, then by ISO datetime descending within each date
+SORTED_ROWS="$(sort -t$'\t' -k2,2r -k15,15r "$ROWS_FILE")"
+
+# ---------- Format date for section headers ----------
+format_date_header() {
+  local ymd="$1"
+  # Try macOS date
+  date -j -f '%Y-%m-%d' "$ymd" '+%d %b %y - %A' 2>/dev/null && return
+  # Try GNU date
+  date -d "$ymd" '+%d %b %y - %A' 2>/dev/null && return
+  # Fallback
+  echo "$ymd"
+}
+
+# ---------- Write the report ----------
+{
+  echo "# Commit Report"
+  echo ""
+  echo "**Period:** ${PERIOD_LABEL}"
+  echo "**Repository:** ${REPO_NAME}"
+  echo "**Total Commits:** ${TOTAL_COMMITS}"
+  echo ""
+
+  # Author summary table
+  echo "## Summary by Author"
+  echo ""
+  echo "| Author | Commits | Lines Added | Lines Removed |"
+  echo "|--------|---------|-------------|---------------|"
+  awk -F'\t' '{
+    commits[$1]++
+    added[$1]+=$2
+    removed[$1]+=$3
+  } END {
+    for (a in commits) printf "| %s | %d | +%d | -%d |\n", a, commits[a], added[a], removed[a]
+  }' "$AUTHOR_STATS" | sort -t'|' -k4 -rn
+  echo ""
+
+  # Commits table grouped by date
+  echo "## All Commits"
+  echo ""
+
+  current_date=""
+  while IFS=$'\t' read -r timestamp date short_hash author message pr_display added_files modified_files deleted_files lines_added lines_removed pr_key raw_la raw_lr iso_dt; do
+    if [ "$date" != "$current_date" ]; then
+      if [ -n "$current_date" ]; then
+        echo ""
+      fi
+      formatted_date="$(format_date_header "$date")"
+      echo "### ${formatted_date}"
+      echo ""
+      echo "| Timestamp | Commit | Author | Message | PR | Files Added | Files Modified | Files Deleted | Lines (+) | Lines (-) |"
+      echo "|-----------|--------|--------|---------|-----|-------------|----------------|---------------|-----------|-----------|"
+      current_date="$date"
+    fi
+    echo "| ${timestamp} | ${short_hash} | ${author} | ${message} | ${pr_display} | ${added_files} | ${modified_files} | ${deleted_files} | ${lines_added} | ${lines_removed} |"
+  done <<< "$SORTED_ROWS"
+
+  echo ""
+
+  # PR summary table
+  echo "## Summary by PR"
+  echo ""
+  echo "| PR | Commits | Lines Added | Lines Removed |"
+  echo "|----|---------|-------------|---------------|"
+
+  awk -F'\t' '{
+    commits[$1]++
+    added[$1]+=$2
+    removed[$1]+=$3
+  } END {
+    for (k in commits) printf "%s\t%d\t%d\t%d\n", k, commits[k], added[k], removed[k]
+  }' "$PR_STATS" | sort -t$'\t' -k1,1 | while IFS=$'\t' read -r pr_key count la lr; do
+    if [ "$pr_key" = "direct" ]; then
+      echo "| Direct commits | ${count} | +${la} | -${lr} |"
+    else
+      title="$(lookup_pr_title "$pr_key")"
+      if [ "$IS_GITHUB" = true ] && [ -n "$REPO_NAME" ] && [ "$REPO_NAME" != "$(basename "$REPO_ROOT")" ]; then
+        pr_link="[#${pr_key}](https://github.com/${REPO_NAME}/pull/${pr_key})"
+      else
+        pr_link="#${pr_key}"
+      fi
+      if [ -n "$title" ]; then
+        echo "| ${title} ${pr_link} | ${count} | +${la} | -${lr} |"
+      else
+        echo "| ${pr_link} | ${count} | +${la} | -${lr} |"
+      fi
+    fi
+  done
+
+  echo ""
+  echo "---"
+  echo ""
+  echo "*Generated on ${REPORT_DATE} by [git-commit-report](https://github.com/jeremylyng/git-commit-report)*"
+
+} > "${REPO_ROOT}/${OUTPUT_FILE}"
+
+echo -e "${GREEN}Report written to ${OUTPUT_FILE}${RESET} (${TOTAL_COMMITS} commits)"
